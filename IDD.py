@@ -188,102 +188,87 @@ class ImprovedDocumentImageDeduplicator:
             return 0
     
     def find_duplicate_regions_improved(self, img1_bytes, img2_bytes, min_match_area_ratio=0.3):
-        """Find duplicate regions with improved accuracy using multiple methods"""
         img1 = cv2.imdecode(np.frombuffer(img1_bytes, np.uint8), cv2.IMREAD_COLOR)
         img2 = cv2.imdecode(np.frombuffer(img2_bytes, np.uint8), cv2.IMREAD_COLOR)
-        
+    
         if img1 is None or img2 is None:
-            return None, 0, 0, 0  # 修复：返回4个值
-        
-        # Store original dimensions
+            return None, 0, 0, 0
+    
         h1, w1 = img1.shape[:2]
         h2, w2 = img2.shape[:2]
-        
-        # Method 1: Template matching for large duplicate regions
-        scale = 0.5  # Scale down for faster processing
-        template = cv2.resize(img1, (int(w1 * scale), int(h1 * scale)))
-        search_img = cv2.resize(img2, (int(w2 * scale), int(h2 * scale)))
-        
-        # Convert to grayscale
-        template_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
-        search_gray = cv2.cvtColor(search_img, cv2.COLOR_BGR2GRAY)
-        
-        # Template matching
-        result = cv2.matchTemplate(search_gray, template_gray, cv2.TM_CCOEFF_NORMED)
-        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
-        
-        # Check if we have a good template match
-        template_match_quality = max_val
-        
-        # Method 2: Improved ORB with spatial consistency check
+    
+        # ---------- 模板匹配部分（带尺寸检查，跳过不兼容对） ----------
+        template_match_quality = 0
+        # 检查哪个图像可以作为模板（必须两个维度都 <= 另一个）
+        if h1 <= h2 and w1 <= w2:
+            # img1 是模板，img2 是搜索图
+            template = cv2.resize(img1, (int(w1 * 0.5), int(h1 * 0.5)))
+            search = cv2.resize(img2, (int(w2 * 0.5), int(h2 * 0.5)))
+            template_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+            search_gray = cv2.cvtColor(search, cv2.COLOR_BGR2GRAY)
+            result = cv2.matchTemplate(search_gray, template_gray, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, _ = cv2.minMaxLoc(result)
+            template_match_quality = max_val
+        elif h2 <= h1 and w2 <= w1:
+            # img2 是模板，img1 是搜索图
+            template = cv2.resize(img2, (int(w2 * 0.5), int(h2 * 0.5)))
+            search = cv2.resize(img1, (int(w1 * 0.5), int(h1 * 0.5)))
+            template_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+            search_gray = cv2.cvtColor(search, cv2.COLOR_BGR2GRAY)
+            result = cv2.matchTemplate(search_gray, template_gray, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, _ = cv2.minMaxLoc(result)
+            template_match_quality = max_val
+        # 否则无法进行模板匹配，template_match_quality 保持 0
+    
+        # ---------- ORB 特征匹配（始终使用原始 img1/img2） ----------
         orb = cv2.ORB_create(nfeatures=500, scoreType=cv2.ORB_FAST_SCORE)
-        
-        # Detect keypoints and compute descriptors
         kp1, des1 = orb.detectAndCompute(img1, None)
         kp2, des2 = orb.detectAndCompute(img2, None)
-        
+    
         if des1 is None or des2 is None or len(kp1) < 10 or len(kp2) < 10:
-            return None, 0, template_match_quality, 0  # 修复：返回4个值
-        
-        # Use BFMatcher with ratio test
+            return None, 0, template_match_quality, 0
+    
         bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
         matches = bf.knnMatch(des1, des2, k=2)
-        
-        # Apply ratio test (Lowe's ratio test)
+    
         good_matches = []
         for m, n in matches:
             if m.distance < 0.75 * n.distance:
                 good_matches.append(m)
-        
+    
         if len(good_matches) < 10:
-            return None, len(good_matches), template_match_quality, 0  # 修复：返回4个值
-        
-        # Check spatial consistency - matches should be in similar relative positions
+            return None, len(good_matches), template_match_quality, 0
+    
         src_pts = np.float32([kp1[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
         dst_pts = np.float32([kp2[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
-        
-        # Find homography matrix
         M, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
-        
+    
         if M is None:
-            # No consistent transformation found
-            return None, len(good_matches), template_match_quality, 0  # 修复：返回4个值
-        
-        # Count inliers
+            return None, len(good_matches), template_match_quality, 0
+    
         inlier_count = np.sum(mask)
-        
-        # Calculate area of matched region (approximate)
         min_area_ratio = 0
         composite = None
-        
+    
         if inlier_count >= 10:
-            # Create convex hull of matched points
             try:
                 src_inliers = src_pts[mask.ravel() == 1]
                 dst_inliers = dst_pts[mask.ravel() == 1]
-                
                 if len(src_inliers) > 4:
-                    # Calculate convex hull area ratio
                     hull_src = cv2.convexHull(src_inliers)
                     hull_dst = cv2.convexHull(dst_inliers)
-                    
                     area_src = cv2.contourArea(hull_src)
                     area_dst = cv2.contourArea(hull_dst)
-                    
-                    # Calculate area ratios
                     area_ratio_src = area_src / (w1 * h1)
                     area_ratio_dst = area_dst / (w2 * h2)
-                    
                     min_area_ratio = min(area_ratio_src, area_ratio_dst)
-                    
-                    # Create composite visualization
                     composite = self.create_composite_visualization(
                         img1, img2, kp1, kp2, good_matches, mask
                     )
             except Exception as e:
                 print(f"Error in area calculation: {e}")
                 min_area_ratio = 0
-        print("composite, inlier_count, template_match_quality, min_area_ratio:",composite, inlier_count, template_match_quality, min_area_ratio)
+    
         return composite, inlier_count, template_match_quality, min_area_ratio
     
     def create_composite_visualization(self, img1, img2, kp1, kp2, matches, mask):
@@ -583,7 +568,7 @@ class ImprovedDocumentImageDeduplicator:
                     pass
 
 def main():
-    parser = argparse.ArgumentParser(description="AI Image Duplication Detection Tool")
+    parser = argparse.ArgumentParser(description="Improved AI Image Duplication Detection Tool")
     parser.add_argument("input_file", help="Input Word or PDF document path")
     parser.add_argument("--output", "-o", default="improved_report.pdf", 
                        help="Output report path")
