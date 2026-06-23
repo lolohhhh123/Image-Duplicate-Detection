@@ -1,4 +1,4 @@
-# Improved Document Image Deduplicator
+# Image Duplicate Detection for PDF and Word files
 
 A powerful tool to detect duplicate or near-duplicate images inside **PDF** and **Word (.docx)** documents. It combines multiple image comparison techniques – perceptual hashing, ORB feature matching, template matching, structural similarity (SSIM), and optional deep learning features – to reliably find even visually similar or partially copied images, and generates a comprehensive PDF report with visual evidence.
 
